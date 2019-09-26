@@ -1,0 +1,1 @@
+These scripts are used to connect the output from GATK's JointCalling method. This method uses more 
