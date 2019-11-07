@@ -9,10 +9,10 @@ outF = sys.argv[2]
 added = False
 GQcut = 20
 DPcut = 8
-ABhetMin = 0.25
-ABhetMax = 0.75
+ABhetMin = 0.30
+ABhetMax = 0.70
 ABhomCut = 0.80
-
+debug = False
 
 # Find non mendelian inheratence
 def nonMendelian(kid,mom,dad):
@@ -31,7 +31,6 @@ def nonMendelian(kid,mom,dad):
 		var = False
 	# At least one allele must be same as parental
 	elif(not((kid[0] == mom[0]) or (kid[2] == mom[0]))):
-		print("Double DNM? Check:\n",kid,mom,dad)
 		var = False
 		flag = True
 	else:
@@ -58,6 +57,8 @@ def checkFam(kid,mom,dad):
 # Check the quality of each trio member's genotype call
 def quality(var,fmtList,kid,mom,dad):
 	passes = True
+	if("GT" in fmtList):
+		gtIdx = fmtList.index("GT")
 	if("GQ" in fmtList):
 		gqIdx = fmtList.index("GQ")
 	else:
@@ -98,17 +99,18 @@ def quality(var,fmtList,kid,mom,dad):
 				print("No DP here, check out:\n",kid,mom,dad)
 			if(passes and adIdx):
 				AD = mem.split(":")[adIdx].split(",")
+				GTal = mem.split(":")[gtIdx].split("/")
 				adSum = 0
 				for ads in AD:
 					adSum += int(ads)
-				al1 = int(mem[0])
-				al2 = int(mem[2])
+				al1 = int(GTal[0])
+				al2 = int(GTal[1])
 				al2dp = int(AD[al2])
 				if(adSum == 0):
-					print("FLAG02: AD SUM IS 0")
-					print("adSum is 0, check out:\n")
+					print("\nFLAG02: AD SUM IS 0")
+					print("adSum is 0, check out:")
+					print("AD is: ",",".join(AD))
 					print("al1,al2,al2dp,adSum = ",al1,al2,al2dp,adSum)
-					print("AB= ",ab)
 					print("Var1,Var2 = ",var[0],var[1]) 
 					print("mem= ",mem,"\n")
 					print(kid,mom,dad)
@@ -117,10 +119,10 @@ def quality(var,fmtList,kid,mom,dad):
 					al2 = 2
 				else:
 					ab = round(al2dp/adSum,4)
-				if(al1 != al2 and (ab < ABhetMin or ABhetMax >0.75)):
+				if(al1 != al2 and (ab < ABhetMin or ab > ABhetMax )):
 					passes = False
 				elif(al1 == al2 and ab < ABhomCut):
-					print("FLAG03: HOM WITH AB < 1")
+					print("\nFLAG03: HOM WITH AB < 1")
 					print("Hom with AB less than 1, check out:\n")
 					print("al1,al2,al2dp,adSum = ",al1,al2,al2dp,adSum)
 					print("AB= ",ab)
@@ -128,6 +130,131 @@ def quality(var,fmtList,kid,mom,dad):
 					print("mem= ",mem,"\n")
 					print(kid,mom,dad)
 	return passes
+
+# Returns the allele balance when given the allele depth values and genotype
+def getAB(inAD,inGT,altAlle):
+	allDP = inAD.split(",")
+	gtAl = int(inGT.split("/")[1])
+	dpSum = sum([int(dp) for dp in allDP])
+	if( dpSum != 0):
+		outAB = round( (int(allDP[gtAl]) / dpSum) ,3)
+	else:
+		outAB = "Error"
+	return(outAB)
+
+# Return the QD for specific child sample
+def getQD(inFmt,inKid):
+	fmtVals = inFmt.split(":")
+	kidVals = inKid.split(":")
+	gtIx    = fmtVals.index("GT")
+	plIx    = fmtVals.index("PL")
+	dpIx    = fmtVals.index("DP")
+	altAlle = int(kidVals[gtIx].split("/")[1])
+	plVals  = kidVals[plIx].split(",")
+	if(altAlle == 1):
+		gtPL = sorted([int(plVals[0]),int(plVals[1]),int(plVals[2])])
+	elif(altAlle == 2):
+		gtPL = sorted([int(plVals[0]),int(plVals[3]),int(plVals[5])])
+	elif(altAlle == 3):
+		gtPL = sorted([int(plVals[0]),int(plVals[6]),int(plVals[9])])
+	elif(altAlle == 4):
+		gtPL = sorted([int(plVals[0]),int(plVals[10]),int(plVals[14])])
+	elif(altAlle == 5):
+		gtPL = sorted([int(plVals[0]),int(plVals[15]),int(plVals[20])])
+	outQD = int(gtPL[1])/int(kidVals[dpIx])
+	return(outQD)
+
+# Remove values from INFO fields that are not from the alleles in this trio
+def removeExtraInfo(inInfo, altGT):
+	infVals = inInfo.split(";")
+	newVals = []
+	# Values in the info will be ordered allele first for 0/1, second for 0/2 etc.
+	# Substracting 1 makes it compatible with 0 starting indexes
+	altGtInt = int(altGT) - 1
+	for inf in infVals:
+		if( "," in inf):
+			fld,vals = inf.split("=")
+			valLst = vals.split(",")
+			newInf = fld+"="+valLst[altGtInt]
+			newVals.append(newInf)              
+		else:
+			newVals.append(inf)
+	newInfoField = ";".join(newVals)
+	return(newInfoField)
+
+# Change the samples fields to have:
+#  - AB value for both hets and homs
+#  - GT values of 0 and 1, no more multiple alleles per line
+#  - AD from different genotypes removed
+#  - PL from different genotypes removed
+def removeExtraFormat(inFormat,inKid,inMom,inDad):
+	outAll = [[],[],[],[]]
+	inAll = []
+	flag = False
+	for iStr in [inFormat,inKid,inMom,inDad]:
+		inAll.append(iStr.split(":"))
+	altAllele = int(inAll[1][0][2])
+	inGTix = inAll[0].index("GT")
+	inADix = inAll[0].index("AD") 
+	for fIx in range(len(inAll[0])):
+		if(fIx == 1):
+			outAll[0].append("AB")
+			for mIx in [1,2,3]:
+				mAllele = inAll[mIx][inGTix]
+				mA1 = int(mAllele[0]) 
+				mA2 = int(mAllele[2])
+				denom = int(inAll[mIx][inADix].split(",")[mA1]) + int(inAll[mIx][inADix].split(",")[mA2])
+				if(denom == 0):
+					print("Kid in filt: \n",inKid)
+					print("Mom in filt: \n",inMom)
+					print("Dad in filt: \n",inDad)
+				newAB = getAB(inAll[mIx][inADix],mAllele,altAllele)
+				if(newAB == "Error"):
+					flag = True
+					print("\nFLAG04: AB value error")
+					print("Kid in filt: \n",inKid)
+					print("Mom in filt: \n",inMom)
+					print("Dad in filt: \n",inDad)
+					newAB = inAll[mIx][inADix]+",ERR"
+				outAll[mIx].append(str(newAB))
+		if(inAll[0][fIx] == "GT"):
+			outAll[0].append("GT")
+			for mIx in [1,2,3]:
+				mAlle1,mAlle2 = inAll[mIx][fIx].split("/")
+				if(mAlle1 != "0"):
+					mAlle1 = "1"
+				if(mAlle2 != "0"):
+					mAlle2 = "1"
+				outAll[mIx].append(str(mAlle1+"/"+mAlle2))
+		elif(inAll[0][fIx] == "PL"):
+			outAll[0].append("PL")
+			for mIx in [1,2,3]:
+				plVals = inAll[mIx][fIx].split(",")
+				if(str(altAllele) == "1"):
+					newPL = plVals[0]+","+plVals[1]+","+plVals[2]	
+				elif(str(altAllele) == "2"):
+					newPL = plVals[0]+","+plVals[3]+","+plVals[5]	
+				elif(str(altAllele) == "3"):
+					newPL = plVals[0]+","+plVals[6]+","+plVals[9]	
+				else:
+					newPL = inAll[mIx][fIx]
+				outAll[mIx].append(str(newPL))
+		elif(inAll[0][fIx] == "AD"):
+			outAll[0].append("AD")
+			for mIx in [1,2,3]:
+				adVals = inAll[mIx][fIx].split(",")
+				newAD = adVals[0]+","+adVals[altAllele]
+				outAll[mIx].append(str(newAD))
+		elif(inAll[0][fIx] not in ["AD","GT","AB","PL"]):
+			outAll[0].append(inAll[0][fIx])
+			for mIx in [1,2,3]:
+				outAll[mIx].append(inAll[mIx][fIx])
+	outFmt = ":".join(outAll[0])
+	outKid = ":".join(outAll[1]) 
+	outMom = ":".join(outAll[2]) 
+	outDad = ":".join(outAll[3])
+	return(outFmt,outKid,outMom,outDad,flag)
+
 
 
 # Main code:
@@ -159,29 +286,89 @@ with open(inp, "r") as iFh,open(outF,"w") as out:
 			for ind in range(9,len(headEls),3):
 				kidID,momID,dadID = headEls[ind],headEls[ind+1],headEls[ind+2]
 				kid,mom,dad = varLine[ind],varLine[ind+1],varLine[ind+2]
-				#Check they are correct IDs
+				if(kid[0] == "." or kid[2] == "."):
+					continue
+				else:
+					varCheck = [varList[int(kid[0])],varList[int(kid[2])]]
+				if(len(varCheck[0]) > 1 or len(varCheck[1]) > 1 or "*" in [varCheck]):
+					continue
+				if(debug):
+					print("\n\n\n")
+					print("Processing "+kidID+", "+momID+", and "+dadID+" at position: "+varLine[0]+":"+varLine[1])
+					print("kid:\n",kid)
+					print("mom:\n",mom)
+					print("dad:\n",dad)
+					print("Testing for non mendelian inheritance")
 				nonMend,flag  = nonMendelian(kid,mom,dad) 
 				if(flag):
-					print("FLAG01: DOUBLE DNM")
-					print(iLine)
+					print("\nFLAG01: DOUBLE DNM")
+					print("Position: ",varLine[0],varLine[1])
+					print("Ref: ",varLine[3])
+					print("Alts: ",varLine[4])
+					print(kidID,kid)
+					print(momID,mom)
+					print(dadID,dad)
+				# Check they are correct IDs for a trio and if the variant 
+				# is a novel allele not present in the parents (non Mendelian)
+				if(debug):
+					print("Testing family IDs")
 				if(checkFam(kidID,momID,dadID) and nonMend):
-					# Add trio ID
-					varLine[7] += ";TrioID="+kidID[0:4]
+					if(debug):
+						print("Passed famCheck and nonMend tests")
+					# Remove any previously added TrioID, TrioDP and TrioQD values in the INFO field
+					cleanInfoFields = [(iV) for iV in varLine[7].split(";") if ("TrioID" not in iV and "TrioDP" not in iV and "TrioQD" not in iV)]
+					# Add current trio ID to INFO field (varLine[7]) and append it to ID field (varLine[2])
+					cleanInfoFields.append("TrioID="+kidID[0:4])
+					varLine[7] = ";".join(cleanInfoFields)
 					idField = varLine[2]+","+kidID[0:4]
-					# Verify depth and quality, if pass calculate trio specific depth and print
-					fmt = varLine[8].split(":")
+					# Verify depth and quality, if pass calculate trio specific depth and qualByDepth,
+					# remove values from other genotypes and print
 					varCheck = [varList[int(kid[0])],varList[int(kid[2])]]
+					fmt = varLine[8].split(":")
+					if(debug):
+						print("Testing quality")
 					if(quality(varCheck,fmt,kid,mom,dad)):
+						if(debug):
+							print("Passed quality test")
+						# Find depth value index
 						dpIdx = fmt.index("DP")
-						cDp = int(kid.split(":")[dpIdx])
+						gtIdx = fmt.index("GT")
+						plIdx = fmt.index("PL")
+						# Split kid sample info
+						kidSampVals = kid.split(":")
+						# Obtain depth value from each trio member
+						cDp = int(kidSampVals[dpIdx])
 						mDp = int(mom.split(":")[dpIdx])
 						fDp = int(dad.split(":")[dpIdx])
+						# Add it into a single TrioDepth value
 						trioDP = cDp + mDp + fDp
-						varLine[7] += ";TrioDP="+str(trioDP)
+						# Calculate trio specific Quality by Depth stat
+						trioQD = round(getQD(varLine[8],kid),2)
+						# Add the two new INFO fields: TrioDP and TrioQD
+						cleanInfoFields.append("TrioDP="+str(trioDP))
+						cleanInfoFields.append("TrioQD="+str(trioQD))
+						# Use function to remove the value for other alleles from the joined updated INFO fields
+						fixedInfo = removeExtraInfo(";".join(cleanInfoFields),kidSampVals[gtIdx][2])
+						# Remove the value for other genotypes that are not in the trio
+						fixedFmt, fixedKid, fixedMom, fixedDad, flag2 = removeExtraFormat( varLine[8], kid, mom, dad )
+						if(flag2):
+							print("Position: ",varLine[0],varLine[1])
+							print("FMT flag")
+						# If the kid's genotype doesn't have the reference allele (e.g. kid genotype 1/2 or 2/3)
+						# then but both alternate alleles in the REF field of the VCF. 
+						# Otherwise make the ALT field the alternate allele in the kid genotype.
+						# Example 1: If reference is A and kid is G/T then REF field is A and ALT field is G,T
+						# Example 2: If reference is A and kid is A/T then REF field is A and ALT field is T
 						if(varLine[3] in varCheck):
 							subVars = varCheck[1]
 						else:
-							subVars = varCheck[0],varCheck[1]
-						print("\t".join(varLine[0:2]+[idField,varLine[3],subVars]+varLine[5:9]+[kid,mom,dad]),file=out)    
-
-
+							subVars = varCheck[0]+","+varCheck[1]
+						if(debug):
+							print("PASSED ALL")
+						print("\t".join(varLine[0:2]+[idField,varLine[3],subVars]+varLine[5:7]+[fixedInfo,fixedFmt,fixedKid,fixedMom,fixedDad]),file=out)
+					else:
+						if(debug):
+							print("QUALITY FAILED")
+				else:
+					if(debug):
+						print("This variant follows mendelian inheritance")
