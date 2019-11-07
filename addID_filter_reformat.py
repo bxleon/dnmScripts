@@ -279,19 +279,39 @@ with open(inp, "r") as iFh,open(outF,"w") as out:
 			oLine = iLine.rstrip()
 			varLine = oLine.split("\t")
 			varList = [varLine[3]]
+			# If there are more than 1 alternate allele, make them into a list
+			# otherwise make a list with the single alt allele
 			if("," in varLine[4]):
 				varList += varLine[4].split(",")
 			else:
 				varList += [varLine[4]]
+			# For all indices past 9 (FORMAT) process them in groups of 3
+			# If the formatting is correct, these should be ordered child, mother and father
 			for ind in range(9,len(headEls),3):
 				kidID,momID,dadID = headEls[ind],headEls[ind+1],headEls[ind+2]
 				kid,mom,dad = varLine[ind],varLine[ind+1],varLine[ind+2]
+				# If the IDs are not compatible with being a trio, exit the script and ask for
+				# verification of the sample IDs. If DEBUG mode is true, print the step the script is at.
+				if(debug):
+					print("Testing family IDs")
+				if(not checkFam(kidID,momID,dadID)):
+					print("The IDs for this set of three are:",kidID,momID,dadID,sep="\n")
+					print("Their first 4 characters, where the Family ID is supposed to be, don't match")
+					print("Please check header format and make sure there are 3 samples per trio in the correct order")
+					sys.exit()
+				# If the kid's genotype has a missing character, '.', then continue to
+				# the next variant, otherwise fetch the correct variant from the variant list
+				# Since variants are ordered starting at 0, the GT value should correspond to
+				# the correct variant identity for the child
 				if(kid[0] == "." or kid[2] == "."):
 					continue
 				else:
 					varCheck = [varList[int(kid[0])],varList[int(kid[2])]]
+				# If the reference or variant alleles are not a single nucleotide, continue to next
+				# If any have the asterisk character representing a deletion, continue to next
 				if(len(varCheck[0]) > 1 or len(varCheck[1]) > 1 or "*" in [varCheck]):
 					continue
+				# If debug is on, print the current IDs with the SNV ID and location being processed
 				if(debug):
 					print("\n\n\n")
 					print("Processing "+kidID+", "+momID+", and "+dadID+" at position: "+varLine[0]+":"+varLine[1])
@@ -299,7 +319,11 @@ with open(inp, "r") as iFh,open(outF,"w") as out:
 					print("mom:\n",mom)
 					print("dad:\n",dad)
 					print("Testing for non mendelian inheritance")
+				# Test if the proband (i.e. child,kid, sample001) has a genotype incompatible with the
+				# parental genotypes. Flag variants with double DNMs (almost 99.99% are errors)
 				nonMend,flag  = nonMendelian(kid,mom,dad) 
+				# If the test returns a True flag, then report in case we want to double check the supposed
+				# double DNM. (or incorrect parent files?)
 				if(flag):
 					print("\nFLAG01: DOUBLE DNM")
 					print("Position: ",varLine[0],varLine[1])
@@ -308,31 +332,36 @@ with open(inp, "r") as iFh,open(outF,"w") as out:
 					print(kidID,kid)
 					print(momID,mom)
 					print(dadID,dad)
-				# Check they are correct IDs for a trio and if the variant 
-				# is a novel allele not present in the parents (non Mendelian)
-				if(debug):
-					print("Testing family IDs")
-				if(checkFam(kidID,momID,dadID) and nonMend):
+				# If the variant passes as non mendelian inheritance, proceed to test quality.
+				if(nonMend):
+					# If DEBUG mode, print what step the script is at.
 					if(debug):
 						print("Passed famCheck and nonMend tests")
-					# Remove any previously added TrioID, TrioDP and TrioQD values in the INFO field
+					# Remove any previously added TrioID, TrioDP and TrioQD values from the current  INFO field
+					# For cases where there are multple samples in the file that have different alternate allele
+					# that could be de novo SNVs
 					cleanInfoFields = [(iV) for iV in varLine[7].split(";") if ("TrioID" not in iV and "TrioDP" not in iV and "TrioQD" not in iV)]
-					# Add current trio ID to INFO field (varLine[7]) and append it to ID field (varLine[2])
+					# Add current trio ID to INFO field (varLine[7]) and append it to ID field (varLine[2]).
+					# In single trio testing, the Family ID (or TrioID) doesn't need to be added to the ID field.
+					# We modify it anyways for consistency.
 					cleanInfoFields.append("TrioID="+kidID[0:4])
 					varLine[7] = ";".join(cleanInfoFields)
 					idField = varLine[2]+","+kidID[0:4]
-					# Verify depth and quality, if pass calculate trio specific depth and qualByDepth,
-					# remove values from other genotypes and print
+					# Verify depth and quality, if those values pass the minimum requirement set at the start of 
+					# the scrip, calculate trio specific depth and qualByDepth values.
+					# Also remove values from other genotypes if present.
 					varCheck = [varList[int(kid[0])],varList[int(kid[2])]]
 					fmt = varLine[8].split(":")
+					# Print current algorithm step if on DEBUG mode
 					if(debug):
 						print("Testing quality")
 					if(quality(varCheck,fmt,kid,mom,dad)):
+						# Print current algorithm step if on DEBUG mode
 						if(debug):
 							print("Passed quality test")
-						# Find depth value index
-						dpIdx = fmt.index("DP")
+						# Find variant specific indeces for GT,DP, and PL values
 						gtIdx = fmt.index("GT")
+						dpIdx = fmt.index("DP")
 						plIdx = fmt.index("PL")
 						# Split kid sample info
 						kidSampVals = kid.split(":")
@@ -343,14 +372,22 @@ with open(inp, "r") as iFh,open(outF,"w") as out:
 						# Add it into a single TrioDepth value
 						trioDP = cDp + mDp + fDp
 						# Calculate trio specific Quality by Depth stat
+						# Our heuristic is the childs GQ score divided by Depth.
 						trioQD = round(getQD(varLine[8],kid),2)
 						# Add the two new INFO fields: TrioDP and TrioQD
 						cleanInfoFields.append("TrioDP="+str(trioDP))
 						cleanInfoFields.append("TrioQD="+str(trioQD))
-						# Use function to remove the value for other alleles from the joined updated INFO fields
+						# Use the removeExtraInfo function to extract the values that belong to other
+						# alternate alleles that are not the current trios allele.
+						# Only here for multi sample VCF files where all alternate alleles of the same
+						# genomic coordinate are in one line.
 						fixedInfo = removeExtraInfo(";".join(cleanInfoFields),kidSampVals[gtIdx][2])
-						# Remove the value for other genotypes that are not in the trio
+						# Remove the value for other genotypes that are not in the trio. Same as above but
+						# for the individual depth and phenotype likelihood scores. Also, adds AB values.
 						fixedFmt, fixedKid, fixedMom, fixedDad, flag2 = removeExtraFormat( varLine[8], kid, mom, dad )
+						# If the calculation of AB is impossible return an error flag to report.
+						# This could happen if for some reason the Allele Depth for one of the trio member is 0 for both alleles.
+						# Usually indicates the quality filters are too low.
 						if(flag2):
 							print("Position: ",varLine[0],varLine[1])
 							print("FMT flag")
